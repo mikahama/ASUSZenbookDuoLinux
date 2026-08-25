@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Exec=duoDisplays
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name[en_US]=Duo Displays
+Name=Duo Displays
+Comment[en_US]=
+Comment=

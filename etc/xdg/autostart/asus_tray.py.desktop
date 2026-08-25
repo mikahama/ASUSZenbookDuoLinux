@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Exec=asus_tray.py
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+Name[en_US]=asus_tray.py
+Name=asus_tray.py
+Comment[en_US]=
+Comment=

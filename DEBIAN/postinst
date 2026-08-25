@@ -1,0 +1,10 @@
+#!/bin/bash
+
+python -m pip install pillow pystray pyusb
+
+sudo systemctl daemon-reload
+sudo systemctl enable duo-display.service
+sudo systemctl enable lid-monitor.service
+echo "To control the keyboard backlight without sudo, run:"
+echo " sudo usermod -aG dialout $USER"
+echo "Then log out and log back in."

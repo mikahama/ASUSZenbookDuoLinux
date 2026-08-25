@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+
+script_path="$(realpath "$0")"
+cd "$(dirname "$script_path")"
+
+# 3k model
+prefered_resolution="2880x1800@60.001"
+# KScreen rejects Mutter's fractional-refresh mode notation such as @60.001.
+kde_resolution="${prefered_resolution%@*}"
+kde_refresh="${prefered_resolution#*@}"
+ui_scale=1.5 # 1.75
+# y offset = height of resolution / ui_scale (1800/1.7475... = 1030), but better to check via bustle (recording session bus, you are interested in org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig call. start recording and configure display in gnome display settings)
+y_offset=1200
+backlight=card1-eDP-2-backlight
+
+# 1080p model
+#prefered_resolution="1920x1200@60.003"
+#backlight=card1-eDP-2-backlight
+#ui_scale=1
+#y_offset=1200
+
+function suenv {
+  sudo /usr/bin/env "$@"
+}
+
+function display-backend {
+  case ":${XDG_CURRENT_DESKTOP:-}:${DESKTOP_SESSION:-}:" in
+    *:KDE:*|*:plasma:*|*:Plasma:*) echo kde ;;
+    *) echo gnome ;;
+  esac
+}
+
+function kde-output {
+  # Some KScreen versions emit ANSI colors even when stdout is piped.
+  kscreen-doctor -o 2>/dev/null | sed -E $'s/\x1b\\[[0-9;]*[[:alpha:]]//g'
+}
+
+function kde-output-lines {
+  # kscreen-doctor reports one output per line beginning with "Output:".
+  kde-output | sed -n '/^Output: /p'
+}
+
+function kde-mode-id {
+  # KScreen mode names include a compositor-specific refresh-rate format, while
+  # mode IDs are stable for the lifetime of a display configuration.  Find the
+  # mode for this connector nearest the configured refresh rate and use its ID.
+  local output="$1"
+  kde-output | awk -v output="$output" -v resolution="$kde_resolution" -v refresh="$kde_refresh" '
+    /^Output:/ { selected = ($3 == output) }
+    selected {
+      for (i = 1; i <= NF; i++) {
+        if (match($i, /[0-9]+:[0-9]+x[0-9]+@[0-9.]+/)) {
+          mode = substr($i, RSTART, RLENGTH)
+          split(mode, parts, ":")
+          split(parts[2], dimensions, "@")
+          if (dimensions[1] == resolution) {
+            difference = dimensions[2] - refresh
+            if (difference < 0) difference = -difference
+            if (best_id == "" || difference < best_difference) {
+              best_id = parts[1]
+              best_difference = difference
+            }
+          }
+        }
+      }
+    }
+    END { if (best_id != "") print best_id }
+  '
+}
+
+function external-display-connected {
+  case "$(display-backend)" in
+    kde) kde-output-lines | awk '$3 !~ /^eDP-/ && $0 ~ / connected( |$)/ { found=1 } END { exit !found }' ;;
+    *) [ "$(gnome-monitor-config list|grep display-name|grep -v 'Built-in display'|wc -l)" != "0" ] ;;
+  esac
+}
+
+function active-external-displays {
+  case "$(display-backend)" in
+    kde) kde-output-lines | awk '$3 !~ /^eDP-/ && $0 ~ / enabled / && $0 ~ / connected( |$)/ { print $3 }' ;;
+    *) gnome-monitor-config list|grep -vE 'eDP-[12]'|sed -nE 's/Monitor \[ (.+) \] ON/\1/p' ;;
+  esac
+}
+
+function kde-set-displays {
+  # Keep every layout change atomic.  KScreen uses logical (scaled) coordinates,
+  # so the existing y_offset also describes the side-by-side layouts.
+  local top_mode bottom_mode
+  top_mode="$(kde-mode-id eDP-1)"
+  bottom_mode="$(kde-mode-id eDP-2)"
+  if [ -z "$top_mode" ] || [ -z "$bottom_mode" ]; then
+    echo "Unable to find a $kde_resolution mode for both internal displays." >&2
+    return 1
+  fi
+  case "$1" in
+    top)
+      kscreen-doctor \
+        output.eDP-1.enable output.eDP-1.mode."$top_mode" output.eDP-1.scale."$ui_scale" output.eDP-1.position.0,0 output.eDP-1.rotation.none output.eDP-1.primary \
+        output.eDP-2.disable
+      ;;
+    both)
+      kscreen-doctor \
+        output.eDP-1.enable output.eDP-1.mode."$top_mode" output.eDP-1.scale."$ui_scale" output.eDP-1.position.0,0 output.eDP-1.rotation.none output.eDP-1.primary \
+        output.eDP-2.enable output.eDP-2.mode."$bottom_mode" output.eDP-2.scale."$ui_scale" output.eDP-2.position.0,"$y_offset" output.eDP-2.rotation.none
+      ;;
+    bottom)
+      kscreen-doctor \
+        output.eDP-1.disable \
+        output.eDP-2.enable output.eDP-2.mode."$bottom_mode" output.eDP-2.scale."$ui_scale" output.eDP-2.position.0,0 output.eDP-2.rotation.none output.eDP-2.primary
+      ;;
+    left-up)
+      kscreen-doctor \
+        output.eDP-2.enable output.eDP-2.mode."$bottom_mode" output.eDP-2.scale."$ui_scale" output.eDP-2.position.0,0 output.eDP-2.rotation.left output.eDP-2.primary \
+        output.eDP-1.enable output.eDP-1.mode."$top_mode" output.eDP-1.scale."$ui_scale" output.eDP-1.position."$y_offset",0 output.eDP-1.rotation.left
+      ;;
+    right-up)
+      kscreen-doctor \
+        output.eDP-1.enable output.eDP-1.mode."$top_mode" output.eDP-1.scale."$ui_scale" output.eDP-1.position.0,0 output.eDP-1.rotation.right output.eDP-1.primary \
+        output.eDP-2.enable output.eDP-2.mode."$bottom_mode" output.eDP-2.scale."$ui_scale" output.eDP-2.position."$y_offset",0 output.eDP-2.rotation.right
+      ;;
+  esac
+}
+
+function set-displays {
+  case "$(display-backend)" in
+    kde) kde-set-displays "$1" ;;
+    *)
+      case "$1" in
+        top) gnome-monitor-config set -LpM eDP-1 -m "$prefered_resolution" -s "$ui_scale" -x 0 -y 0 ;;
+        both) gnome-monitor-config set -LpM eDP-1 -m "$prefered_resolution" -s "$ui_scale" -x 0 -y 0 -LM eDP-2 -m "$prefered_resolution" -s "$ui_scale" -x 0 -y "$y_offset" ;;
+        bottom) gnome-monitor-config set -LpM eDP-2 -m "$prefered_resolution" -s "$ui_scale" -x 0 -y 0 ;;
+        left-up) gnome-monitor-config set -LpM eDP-2 -m "$prefered_resolution" -s "$ui_scale" -t left -x 0 -y 0 -LM eDP-1 -m "$prefered_resolution" -s "$ui_scale" -t left -x "$y_offset" -y 0 ;;
+        right-up) gnome-monitor-config set -LM eDP-1 -m "$prefered_resolution" -s "$ui_scale" -t right -x 0 -y 0 -LpM eDP-2 -m "$prefered_resolution" -s "$ui_scale" -t right -x "$y_offset" -y 0 ;;
+      esac
+      ;;
+  esac
+}
+
+function status-internal {
+  case "$(display-backend)" in
+    kde)
+      local top bottom
+      top="$(kde-output-lines | awk '$3 == "eDP-1" && $0 ~ / enabled / { print "on" }')"
+      bottom="$(kde-output-lines | awk '$3 == "eDP-2" && $0 ~ / enabled / { print "on" }')"
+      if [ -n "$top" ] && [ -n "$bottom" ]; then echo both
+      elif [ -n "$top" ]; then echo top
+      elif [ -n "$bottom" ]; then echo bottom
+      else echo none
+      fi
+      ;;
+    *)
+      local internal_monitors
+      internal_monitors="$(gnome-monitor-config list|grep -E "Monitor \\[ eDP-. \\] ON")"
+      case "$(echo "$internal_monitors"|grep -v -E "^$"|wc -l)" in
+        0) echo "none" ;;
+        1) case "$(echo "$internal_monitors"|grep ON)" in
+             "Monitor [ eDP-1 ] ON") echo top ;;
+             "Monitor [ eDP-2 ] ON") echo bottom ;;
+           esac ;;
+        2) echo "both" ;;
+      esac
+      ;;
+  esac
+}
+
+function kde-input-device-paths {
+  qdbus6 org.kde.KWin /org/kde/KWin/InputDevice org.kde.KWin.InputDevice.devices 2>/dev/null | grep -oE '/org/kde/KWin/InputDevice/[[:alnum:]_]+'
+}
+
+function kde-map-touchscreen {
+  local vendor="$1" product="$2" output="$3" device current_vendor current_product
+  for device in $(kde-input-device-paths); do
+    current_vendor="$(busctl --user get-property org.kde.KWin "$device" org.kde.KWin.InputDevice vendor 2>/dev/null)"
+    current_product="$(busctl --user get-property org.kde.KWin "$device" org.kde.KWin.InputDevice product 2>/dev/null)"
+    if [[ "$current_vendor" == *"$vendor"* && "$current_product" == *"$product"* ]]; then
+      busctl --user set-property org.kde.KWin "$device" org.kde.KWin.InputDevice outputName s "$output"
+    fi
+  done
+}
+
+function set-tablet-mapping {
+  case "$(display-backend)" in
+    kde)
+      # KWin exposes these values through org.kde.KWin.InputDevice on Wayland.
+      kde-map-touchscreen 1267 16987 eDP-1 # 04f3:425b
+      kde-map-touchscreen 1267 16986 eDP-2 # 04f3:425a
+      ;;
+    *)
+      for type in tablets touchscreens; do
+        dconf write "/org/gnome/desktop/peripherals/${type}/04f3:425b/output" "['SDC', '0x419d', '0x00000000', 'eDP-1']"
+        dconf write "/org/gnome/desktop/peripherals/${type}/04f3:425a/output" "['SDC', '0x419d', '0x00000000', 'eDP-2']"
+      done
+      ;;
+  esac
+}
+
+function toggle-bottom-touch {
+  case "$(display-backend)" in
+    kde)
+      local device output
+      for device in $(kde-input-device-paths); do
+        if [[ "$(busctl --user get-property org.kde.KWin "$device" org.kde.KWin.InputDevice vendor 2>/dev/null)" == *1267* && "$(busctl --user get-property org.kde.KWin "$device" org.kde.KWin.InputDevice product 2>/dev/null)" == *16986* ]]; then
+          output="$(busctl --user get-property org.kde.KWin "$device" org.kde.KWin.InputDevice outputName 2>/dev/null)"
+          if [ "$output" = 's ""' ]; then kde-map-touchscreen 1267 16986 eDP-2; else kde-map-touchscreen 1267 16986 ""; fi
+        fi
+      done
+      ;;
+    *)
+      local path="/org/gnome/desktop/peripherals/touchscreens/04f3:425a/output"
+      if [ -z "$(dconf read "$path")" ]; then dconf write "$path" "['SDC', '0x419d', '0x00000000', 'eDP-2']"; else dconf reset "$path"; fi
+      ;;
+  esac
+}
+
+case "$1" in
+  watch-displays)
+    while inotifywait -e attrib /dev/bus/usb/*/ ; do
+      if ! external-display-connected; then
+        "$script_path" normal
+      fi
+    done
+    ;;
+  set-displays)
+    sleep 1
+    if ! external-display-connected; then 
+      "$script_path" normal
+    fi
+    ;;
+  normal|bottom-up)
+    if lsusb|grep 0b05:1b2c ; then
+      "$script_path" top
+    else
+      "$script_path" both
+    fi
+    ;;
+  top)
+    set-displays top
+    ;;
+  both)
+    set-displays both
+    ;;
+  bottom)
+    set-displays bottom
+    ;;
+  left-up)
+    set-displays left-up
+    ;;
+  right-up)
+    set-displays right-up
+    ;;
+  status-internal)
+    status-internal
+    ;;
+  status)
+    (
+      active-external-displays
+    )|grep -vE "^$"|sed -z "s/\n/+/g"
+    "$script_path" status-internal
+    ;;
+  toggle)
+    if [ "$("$script_path" status-internal)" != "both" ]; then
+      "$script_path" both
+    else
+      "$script_path" top
+    fi
+    ;;
+  set-tablet-mapping)
+    set-tablet-mapping
+    ;;
+  toggle-bottom-touch)
+    toggle-bottom-touch
+    ;;
+  bat-limit)
+    echo "${2:-80}" | suenv tee /sys/class/power_supply/BAT0/charge_control_end_threshold
+    ;;
+  sync-backlight)
+    cat "/sys/class/backlight/intel_backlight/brightness" |
+      suenv tee /sys/class/backlight/$backlight/brightness
+    ;;
+  set-kb-backlight)
+    suenv python3 bk.py "$2"
+    ;;
+  watch-backlight)
+    "$script_path" sync-backlight
+    while inotifywait -e modify /sys/class/backlight/intel_backlight/brightness ; do
+      "$script_path" sync-backlight
+    done
+    ;;
+  watch-rotation)
+    monitor-sensor --accel |
+      stdbuf -oL grep orientation |
+      stdbuf -oL cut -d: -f2 |
+      stdbuf -oL sed 's/[ )]//g' |
+      xargs -I '{}' stdbuf -oL "$script_path" '{}'
+    ;;
+  *) echo "Usage: duo <top|bottom|both|set-displays|toggle|status|set-tablet-mapping|bat-limit|sync-backlight|set-kb-backlight|watch-backlight|watch-rotation|watch-displays>"
+esac
