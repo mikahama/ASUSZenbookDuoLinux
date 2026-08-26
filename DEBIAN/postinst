@@ -1,9 +1,12 @@
 #!/bin/bash
 
-python -m pip install pillow pystray pyusb
+python -m pip install pillow pystray pyusb evdev
 
+# Versions before 1.5 used a system service. The tray app now manages this
+# helper in the signed-in user's desktop session instead.
+sudo systemctl disable --now asus-duo-fnkeys.service 2>/dev/null || true
 sudo systemctl daemon-reload
 sudo systemctl enable duo-display.service
 echo "To control the keyboard backlight without sudo, run:"
-echo " sudo usermod -aG dialout $USER"
+echo " sudo usermod -aG dialout,input $USER"
 echo "Then log out and log back in."

@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Make the Zenbook Duo USB keyboard's media keys work on Linux.
+
+The keyboard normally sends F1-F6 key presses.  This daemon exclusively grabs
+that keyboard and passes every event through a virtual keyboard, translating
+the media and brightness keys that desktop environments understand.
+"""
+
+import glob
+import argparse
+import configparser
+import logging
+import os
+import subprocess
+import time
+
+from evdev import InputDevice, UInput, ecodes
+
+
+KEYBOARD_NAMES = ("zenbook duo keyboard", "asus zenbook duo keyboard")
+EXTRA_KEYS = (
+    ecodes.KEY_MUTE,
+    ecodes.KEY_VOLUMEDOWN,
+    ecodes.KEY_VOLUMEUP,
+    ecodes.KEY_BRIGHTNESSDOWN,
+    ecodes.KEY_BRIGHTNESSUP,
+)
+KEY_MAP = {
+    ecodes.KEY_F1: ecodes.KEY_MUTE,
+    ecodes.KEY_F2: ecodes.KEY_VOLUMEDOWN,
+    ecodes.KEY_F3: ecodes.KEY_VOLUMEUP,
+    ecodes.KEY_F5: ecodes.KEY_BRIGHTNESSDOWN,
+    ecodes.KEY_F6: ecodes.KEY_BRIGHTNESSUP,
+}
+CUSTOM_COMMAND_KEYS = {
+    ecodes.KEY_F7: "f7",
+    ecodes.KEY_F8: "f8",
+    ecodes.KEY_F9: "f9",
+    ecodes.KEY_F10: "f10",
+    ecodes.KEY_F11: "f11",
+    ecodes.KEY_F12: "f12",
+}
+
+
+def find_keyboard():
+    """Return the event device for the detachable USB keyboard, if present."""
+    for path in glob.glob("/dev/input/by-id/*Zenbook*Duo*Keyboard*event-kbd"):
+        if os.path.exists(path):
+            return path
+
+    for path in glob.glob("/dev/input/event*"):
+        try:
+            device = InputDevice(path)
+            if device.name and device.name.lower() in KEYBOARD_NAMES:
+                device.close()
+                return path
+            device.close()
+        except OSError:
+            continue
+    return None
+
+
+def cycle_backlight(config_path):
+    """Cycle the detachable keyboard backlight through off and levels 1-3."""
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    state_file = os.path.join(config_dir, "backlight-level")
+    os.makedirs(config_dir, exist_ok=True)
+    try:
+        with open(state_file, "r", encoding="utf-8") as state:
+            level = int(state.read().strip())
+    except (OSError, ValueError):
+        level = 0
+
+    next_level = (level + 1) % 4
+    result = subprocess.run(
+        ["/usr/bin/bk.py", str(next_level)], check=False, capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        with open(state_file, "w", encoding="utf-8") as state:
+            state.write(str(next_level))
+    else:
+        logging.warning("Could not set keyboard backlight: %s", result.stderr.strip())
+
+
+def command_for_key(config_path, key):
+    name = CUSTOM_COMMAND_KEYS.get(key)
+    if name is None:
+        return None
+
+    config = configparser.ConfigParser(interpolation=None)
+    config.read(config_path)
+    command = config.get("commands", name, fallback="").strip()
+    return command or None
+
+
+def virtual_keyboard(device):
+    keys = set(device.capabilities(absinfo=False).get(ecodes.EV_KEY, []))
+    keys.update(EXTRA_KEYS)
+    # A virtual keyboard only needs key events. Copying the physical device's
+    # LED, repeat, and miscellaneous capabilities makes some kernels reject
+    # the uinput device with EINVAL.
+    return UInput({ecodes.EV_KEY: list(keys)}, name="ASUS Zenbook Duo Fn Keys")
+
+
+def handle_keyboard(path, config_path):
+    device = InputDevice(path)
+    logging.info("Using %s (%s)", device.name, path)
+    grabbed = False
+
+    try:
+        device.grab()
+        grabbed = True
+        with virtual_keyboard(device) as output:
+            for event in device.read_loop():
+                if event.type == ecodes.EV_KEY:
+                    if event.code == ecodes.KEY_F4:
+                        if event.value == 1:
+                            cycle_backlight(config_path)
+                        continue
+                    command = command_for_key(config_path, event.code)
+                    if command is not None:
+                        if event.value == 1:
+                            logging.info("Running custom command for %s", CUSTOM_COMMAND_KEYS[event.code].upper())
+                            subprocess.Popen(command, shell=True)
+                        continue
+                    output.write(ecodes.EV_KEY, KEY_MAP.get(event.code, event.code), event.value)
+                if event.type == ecodes.EV_SYN and event.code == ecodes.SYN_REPORT:
+                    output.syn()
+    finally:
+        if grabbed:
+            try:
+                device.ungrab()
+            except OSError:
+                # A physical detach also releases the kernel grab.
+                pass
+        device.close()
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        default=os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "asus-duo", "fnkeys.conf"),
+        help="path to the F7-F12 command configuration file",
+    )
+    args = parser.parse_args()
+    while True:
+        path = find_keyboard()
+        if path is None:
+            time.sleep(2)
+            continue
+
+        try:
+            handle_keyboard(path, args.config)
+        except OSError as error:
+            # The keyboard may have been detached. Wait for it to return.
+            logging.info("Keyboard connection changed: %s", error)
+            time.sleep(1)
+        except Exception:
+            logging.exception("Fn-key helper stopped unexpectedly; retrying")
+            time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()
