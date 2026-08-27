@@ -10,7 +10,7 @@ This package is for the moments when you take the keyboard off and want the lapt
 - **Keyboard attached:** turns off the lower display, leaving the main screen active.
 - **Keyboard backlight:** adds a small tray-menu control for turning the keyboard light on or off.
 - **Function keys:** makes the detachable keyboard's mute, volume, keyboard-light, and screen-brightness keys work.
-- **External monitor and closed lid:** turns off the laptop's built-in displays while you use the external monitor, then turns them back on when you open the lid or disconnect the monitor.
+- **External monitor and closed lid:** turns off the laptop's built-in displays if you close the lid while you use the external monitor, then turns them back on when you open the lid or disconnect the monitor.
 
 It works with both KDE Plasma and GNOME. KDE Plasma is the better-supported experience at the moment.
 
