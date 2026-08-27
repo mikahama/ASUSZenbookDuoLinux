@@ -16,11 +16,15 @@ It works with both KDE Plasma and GNOME. KDE Plasma is the better-supported expe
 
 ## Install
 
-Download or build the `.deb` package, then open it with your usual software installer, or install it from a terminal:
+## 1. Add my repo
 
-```bash
-sudo apt install ./asus-duo-tools_1.4_all.deb
-```
+[Add my repository using these instructions](https://mikakalevi.com/repo/)
+
+## 2. Install the helper
+
+    sudo apt install asus-duo-tools
+
+
 
 Log out and back in after installing so the tray menu and display helper can start with your desktop session.
 
